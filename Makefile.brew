@@ -1,0 +1,35 @@
+# Homebrew-based macOS build for this squeezelite fork (Apple Silicon or Intel).
+#
+# Unlike Makefile.osx / Makefile.m1 (which expect bundled static libs and a full
+# Xcode SDK), this builds against Homebrew-installed libraries and the Command
+# Line Tools SDK - the common setup on a personal Mac.
+#
+# One-time dependency install:
+#   brew install portaudio flac libvorbis libogg opus opusfile mpg123 faad2 libsoxr ffmpeg openssl@3
+#
+# Build:
+#   make -f Makefile.brew            # produces ./squeezelite
+#
+# Run the unit test for the watchdog logic:
+#   make test
+#
+# The binary is dynamically linked against $(brew --prefix)/lib, which is fine
+# for running on this machine (keep Homebrew installed).
+
+BREW := $(shell brew --prefix)
+SSL  := $(shell brew --prefix openssl@3)
+
+# Feature set: PortAudio output, FFmpeg (wma/alac/aac fallback), native Opus, soxr
+# resampling, DSD, link-all, visualizer export, TLS, ogg metadata. MP3 is handled
+# by mpg123 (mad omitted via NO_MAD).
+OPTS = -DPORTAUDIO -DFFMPEG -DOPUS -DRESAMPLE -DDSD -DLINKALL -DVISEXPORT -DUSE_SSL -DUSE_LIBOGG -DNO_MAD
+
+CFLAGS  = -Wall -fPIC -O2 -I$(BREW)/include -I$(BREW)/include/opus -I$(SSL)/include
+LDFLAGS = -L$(BREW)/lib -L$(SSL)/lib \
+          -framework CoreAudio -framework AudioToolbox -framework AudioUnit \
+          -framework Carbon -framework IOKit -framework CoreFoundation
+LDADD   = -lpthread -lm
+
+EXECUTABLE ?= squeezelite
+
+include Makefile

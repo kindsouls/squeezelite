@@ -705,9 +705,28 @@ static void slimproto_run() {
 				status.stream_start = output.track_start_time;
 			}
 #if PORTAUDIO
-			if (output.pa_reopen) {
-				_pa_open();
-				output.pa_reopen = false;
+			// only a real PortAudio device can be reopened (stdout output leaves
+			// PortAudio uninitialised), so gate the whole recovery path on it
+			if (output_pa_active()) {
+				// manual recovery trigger (SIGUSR1) - exercise the reopen path on demand
+				if (output_watchdog_triggered()) {
+					LOG_WARN("manual output recovery trigger received (SIGUSR1) - forcing output device reopen");
+					output.pa_reopen = true;
+				}
+				// output stall watchdog: the PortAudio callback refreshes output.updated on
+				// every invocation, so if it stops while we should be streaming the device has
+				// gone silent (stale handle after sleep/wake, USB dropout, CoreAudio churn).
+				// Force a clean reopen rather than writing into a dead stream forever.
+				if (output_watchdog_stalled(output.state, output.error_opening, output.pa_reopen,
+											output.updated, now, output_watchdog_timeout())) {
+					LOG_WARN("output watchdog: no device writes for %u ms (state %d) - forcing output device reopen",
+							 now - output.updated, output.state);
+					output.pa_reopen = true;
+				}
+				if (output.pa_reopen) {
+					_pa_open();
+					output.pa_reopen = false;
+				}
 			}
 #endif
 			if (_start_output && (output.state == OUTPUT_STOPPED || output.state == OUTPUT_OFF)) {

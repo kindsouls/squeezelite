@@ -69,6 +69,12 @@ static log_level loglevel;
 
 static bool running = true;
 
+// true once output_init_pa has initialised PortAudio; lets the control loop tell
+// a real PortAudio device apart from stdout output on a PortAudio build, so a
+// reopen is never attempted against an uninitialised PortAudio.
+static bool pa_active = false;
+bool output_pa_active(void) { return pa_active; }
+
 extern struct outputstate output;
 extern struct buffer *outputbuf;
 
@@ -418,6 +424,10 @@ void _pa_open(void) {
 #endif
 		pa.rate = output.current_sample_rate;
 
+		// give the watchdog a fresh reference: the callback will start refreshing
+		// output.updated shortly, so don't let a just-opened stream look stalled
+		output.updated = gettime_ms();
+
 #ifndef PA18API
 		if ((err = Pa_SetStreamFinishedCallback(pa.stream, pa_stream_finished)) != paNoError) {
 			LOG_WARN("error setting finish callback: %s", Pa_GetErrorText(err));
@@ -609,12 +619,25 @@ void output_init_pa(log_level level, const char *device, unsigned output_buf_siz
 	_pa_open();
 
 	UNLOCK;
+
+#if OSX
+	// native sleep/wake + CoreAudio device-list handling (macOS hardening)
+	output_mac_init(level);
+#endif
+
+	pa_active = true;
 }
 
 void output_close_pa(void) {
 	PaError err;
 
 	LOG_INFO("close output");
+
+	pa_active = false;
+
+#if OSX
+	output_mac_close();
+#endif
 
 	LOCK;
 

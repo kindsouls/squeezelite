@@ -96,6 +96,9 @@ static void usage(const char *argv0) {
 #endif
 		   "  -e <codec1>,<codec2>\tExplicitly exclude native support of one or more codecs; known codecs: " CODECS "\n"
 		   "  -f <logfile>\t\tWrite debug to logfile\n"
+#if PORTAUDIO
+		   "  -k <timeout>\t\tOutput stall watchdog: reopen the output device if no samples are written for <timeout> seconds (default 5, 0 to disable)\n"
+#endif
 #if IR
 		   "  -i [<filename>]\tEnable lirc remote control support (lirc config file ~/.lircrc used if filename not specified)\n"
 #endif
@@ -295,6 +298,15 @@ static void sighandler(int signum) {
 	signal(signum, SIG_DFL);
 }
 
+#if PORTAUDIO && defined(SIGUSR1)
+// Force an output device recovery (reopen). Lets the sleep/wake reopen path be
+// tested without waiting for a real sleep/wake cycle: kill -USR1 <pid>.
+static void sigusr1_handler(int signum) {
+	output_watchdog_trigger();
+	signal(SIGUSR1, sigusr1_handler);
+}
+#endif
+
 int main(int argc, char **argv) {
 	char *server = NULL;
 	char *output_device = "default";
@@ -314,6 +326,9 @@ int main(int argc, char **argv) {
 	char *resample = NULL;
 	char *output_params = NULL;
 	unsigned idle = 0;
+#if PORTAUDIO
+	unsigned output_watchdog_ms = OUTPUT_WATCHDOG_DEFAULT_MS;
+#endif
 #if LINUX || FREEBSD || SUN
 	bool daemonize = false;
 	char *pidfile = NULL;
@@ -363,7 +378,7 @@ int main(int argc, char **argv) {
 
 	while (optind < argc && strlen(argv[optind]) >= 2 && argv[optind][0] == '-') {
 		char *opt = argv[optind] + 1;
-		if (strstr("oabcCdefmMnNpPrsZ"
+		if (strstr("oabcCdefkmMnNpPrsZ"
 #if ALSA
 				   "UVO"
 #endif
@@ -457,6 +472,12 @@ int main(int argc, char **argv) {
 		case 'f':
 			logfile = optarg;
 			break;
+#if PORTAUDIO
+		case 'k':
+			// output stall watchdog timeout in seconds, 0 disables
+			output_watchdog_ms = (unsigned)atoi(optarg) * 1000;
+			break;
+#endif
 		case 'm':
 			{
 				int byte = 0;
@@ -720,6 +741,9 @@ int main(int argc, char **argv) {
 #if defined(SIGHUP)
 	signal(SIGHUP, sighandler);
 #endif
+#if PORTAUDIO && defined(SIGUSR1)
+	signal(SIGUSR1, sigusr1_handler);
+#endif
 
 #if USE_SSL && !LINKALL && !NO_SSLSYM
 	ssl_loaded = load_ssl_symbols();
@@ -790,6 +814,13 @@ int main(int argc, char **argv) {
 		output_init_pulse(log_output, output_device, output_buf_size, output_params, rates, rate_delay, idle);
 #endif
 	}
+
+#if PORTAUDIO
+	// arm the output stall watchdog (PortAudio device output only, not stdout)
+	if (strcmp(output_device, "-")) {
+		output_watchdog_init(log_output, output_watchdog_ms);
+	}
+#endif
 
 #if DSD
 	dsd_init(dsd_outfmt, dsd_delay);

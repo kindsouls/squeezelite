@@ -25,7 +25,8 @@ OPT_PULSEAUDIO = -DPULSEAUDIO
 
 SOURCES = \
 	main.c slimproto.c buffer.c stream.c utils.c \
-	output.c output_alsa.c output_pa.c output_stdout.c output_pack.c output_pulse.c decode.c \
+	output.c output_alsa.c output_pa.c output_stdout.c output_pack.c output_pulse.c \
+	output_watchdog.c output_mac.c decode.c \
 	flac.c pcm.c vorbis.c
 
 SOURCES_DSD      = dsd.c dop.c dsd2pcm/dsd2pcm.c
@@ -180,8 +181,17 @@ $(OBJECTS): $(DEPS)
 .c.o:
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(OPTS) $< -c -o $@
 
+# Unit test for the portable output watchdog timer logic. Self-contained: it
+# compiles only output_watchdog.c with a couple of logging stubs, no audio
+# backend or frameworks required. Run with: make test
+test_watchdog: test_watchdog.c output_watchdog.c $(DEPS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(OPTS) -o $@ test_watchdog.c output_watchdog.c
+
+test: test_watchdog
+	./test_watchdog
+
 clean:
-	rm -f $(OBJECTS) $(EXECUTABLE)
+	rm -f $(OBJECTS) $(EXECUTABLE) test_watchdog
 
 print-%:
 	@echo $* = $($*)

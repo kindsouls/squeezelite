@@ -708,6 +708,21 @@ bool output_flush_streaming(void);
 frames_t _output_frames(frames_t avail);
 void _checkfade(bool);
 
+// output_watchdog.c - portable output stall watchdog (default threshold in ms, 0 disables)
+#define OUTPUT_WATCHDOG_DEFAULT_MS 5000
+void output_watchdog_init(log_level level, u32_t timeout_ms);
+u32_t output_watchdog_timeout(void);
+bool output_watchdog_stalled(output_state state, bool error_opening, bool reopen_pending,
+							 u32_t last_update_ms, u32_t now_ms, u32_t timeout_ms);
+void output_watchdog_trigger(void);   // async-signal-safe; force a recovery (SIGUSR1)
+bool output_watchdog_triggered(void); // consume a pending manual trigger
+
+// output_mac.c - macOS sleep/wake and CoreAudio device list handling
+#if OSX && PORTAUDIO
+void output_mac_init(log_level level);
+void output_mac_close(void);
+#endif
+
 // output_alsa.c
 #if ALSA
 void list_devices(void);
@@ -726,6 +741,7 @@ bool test_open(const char *device, unsigned rates[], bool userdef_rates);
 void output_init_pa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], unsigned rate_delay, unsigned idle);
 void output_close_pa(void);
 void _pa_open(void);
+bool output_pa_active(void); // true when a real PortAudio device (not stdout) is in use
 #endif
 
 // output_pulse.c
