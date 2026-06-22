@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Sample LaunchAgent for running squeezelite as a background service on macOS.
+
+  This is a LaunchAgent (not a LaunchDaemon) on purpose: it must run in your
+  logged-in GUI session so it can reach CoreAudio and receive IOKit sleep/wake
+  and CoreAudio device notifications.
+
+  Install (edit the paths / device name / server first):
+    1. squeezelite -l                       # find your DAC's exact name
+    2. cp examples/squeezelite.plist ~/Library/LaunchAgents/com.squeezelite.plist
+    3. launchctl load  ~/Library/LaunchAgents/com.squeezelite.plist
+    Stop / remove:
+       launchctl unload ~/Library/LaunchAgents/com.squeezelite.plist
+
+  Why these keys:
+    - KeepAlive/SuccessfulExit=false: restart the process when it exits with a
+      non-zero code - which includes the watchdog's "exit for a clean restart"
+      (exit 69) and any crash - but NOT a deliberate clean stop (exit 0).
+    - ThrottleInterval=10: never relaunch more than once every 10s, so a wedged
+      device can't cause a tight restart loop.
+    - ProcessType=Interactive: keep macOS App Nap / timer throttling from
+      slowing the audio callback while the service runs unattended.
+
+  Pairs with the output watchdog: "-k 5:3" reopens the device after 5s of no
+  writes and, if 3 reopens in a row don't restore audio, exits so launchd hands
+  the player a fresh process with a clean audio stack.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.squeezelite</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/USERNAME/bin/squeezelite</string>
+		<string>-n</string>
+		<string>Mac Mini</string>
+		<string>-o</string>
+		<string>Your USB DAC [Core Audio]</string>
+		<string>-s</string>
+		<string>192.168.1.10</string>
+		<string>-k</string>
+		<string>5:3</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>ProcessType</key>
+	<string>Interactive</string>
+
+	<key>StandardOutPath</key>
+	<string>/Users/USERNAME/Library/Logs/squeezelite.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/USERNAME/Library/Logs/squeezelite.log</string>
+</dict>
+</plist>

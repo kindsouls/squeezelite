@@ -97,7 +97,8 @@ static void usage(const char *argv0) {
 		   "  -e <codec1>,<codec2>\tExplicitly exclude native support of one or more codecs; known codecs: " CODECS "\n"
 		   "  -f <logfile>\t\tWrite debug to logfile\n"
 #if PORTAUDIO
-		   "  -k <timeout>\t\tOutput stall watchdog: reopen the output device if no samples are written for <timeout> seconds (default 5, 0 to disable)\n"
+		   "  -k <timeout>[:<restart>]\tOutput stall watchdog: reopen the output device if no samples are written for <timeout> seconds (default 5, 0 disables).\n"
+		   "  \t\t\t<restart> = exit for a supervised (e.g. launchd) restart after this many failed reopens (default 3, 0 disables)\n"
 #endif
 #if IR
 		   "  -i [<filename>]\tEnable lirc remote control support (lirc config file ~/.lircrc used if filename not specified)\n"
@@ -328,6 +329,7 @@ int main(int argc, char **argv) {
 	unsigned idle = 0;
 #if PORTAUDIO
 	unsigned output_watchdog_ms = OUTPUT_WATCHDOG_DEFAULT_MS;
+	unsigned output_watchdog_restart = OUTPUT_WATCHDOG_RESTART_AFTER;
 #endif
 #if LINUX || FREEBSD || SUN
 	bool daemonize = false;
@@ -474,8 +476,14 @@ int main(int argc, char **argv) {
 			break;
 #if PORTAUDIO
 		case 'k':
-			// output stall watchdog timeout in seconds, 0 disables
-			output_watchdog_ms = (unsigned)atoi(optarg) * 1000;
+			// output stall watchdog: <timeout secs>[:<restart-after reopens>]
+			// timeout 0 disables the watchdog; restart 0 disables the self-restart
+			{
+				char *t = next_param(optarg, ':');
+				char *r = next_param(NULL, ':');
+				if (t) output_watchdog_ms = (unsigned)atoi(t) * 1000;
+				if (r) output_watchdog_restart = (unsigned)atoi(r);
+			}
 			break;
 #endif
 		case 'm':
@@ -818,7 +826,7 @@ int main(int argc, char **argv) {
 #if PORTAUDIO
 	// arm the output stall watchdog (PortAudio device output only, not stdout)
 	if (strcmp(output_device, "-")) {
-		output_watchdog_init(log_output, output_watchdog_ms);
+		output_watchdog_init(log_output, output_watchdog_ms, output_watchdog_restart);
 	}
 #endif
 

@@ -22,14 +22,35 @@ Makefile`. Feature flags are passed via `OPTS` (see the `OPT_*` vars in `Makefil
 
 | Target | Command | Notes |
 | --- | --- | --- |
+| **macOS (recommended)** | `make -f Makefile.brew` | Homebrew libs + CLT SDK. See below. |
 | Linux / ALSA (default) | `make` | Default backend is ALSA. |
 | Linux / PortAudio | `make OPTS="-DPORTAUDIO"` | |
-| macOS Intel | `make -f Makefile.osx` | Needs bundled `./include` + `libportaudio.a`. |
-| macOS arm64 (Apple Silicon) | `make -f Makefile.m1` | Needs bundled `./includem1` + `./libm1`. |
+| macOS (bundled libs) | `make -f Makefile.osx` / `Makefile.m1` | Only if you have the bundled static libs in `include/`,`libm1/` **and** full Xcode. |
 | Unit tests | `make test` | Builds & runs `test_watchdog` (no audio backend needed). |
 
 Common feature `OPTS`: `-DDSD -DRESAMPLE -DFFMPEG -DALAC -DOPUS -DVISEXPORT
--DUSE_SSL -DLINKALL`. The macOS makefiles already enable a sensible set.
+-DUSE_SSL -DLINKALL` (see the `OPT_*` vars in `Makefile`).
+
+### Build on macOS with Homebrew (verified on arm64, macOS 15, Command Line Tools)
+
+The stock `Makefile.osx` / `Makefile.m1` need bundled static libs and a full Xcode
+SDK. `Makefile.brew` instead links the Homebrew libraries and the Command Line Tools
+SDK — the usual setup on a personal Mac. One time:
+
+```
+brew install portaudio flac libvorbis libogg opus opusfile mpg123 faad2 libsoxr ffmpeg openssl@3
+make -f Makefile.brew            # -> ./squeezelite (arm64 or Intel)
+```
+
+> **Heads-up:** install those libs *explicitly* (as above). `brew install`/`brew
+> autoremove` will delete codec libs that are only present as orphaned auto-installed
+> dependencies, which breaks the dynamically-linked binary. Explicitly-installed
+> formulae are kept. If a future `brew autoremove` removes one, reinstall it and
+> re-run `make -f Makefile.brew`.
+
+Feature set built by `Makefile.brew`: PortAudio output, FFmpeg (wma/alac/aac),
+native Opus, soxr resampling, DSD, visualizer export, TLS, ogg metadata; MP3 via
+mpg123. Edit `OPTS` in `Makefile.brew` to change it.
 
 List devices and pick one with `-o`:
 
@@ -50,7 +71,7 @@ to a dead stream, `frames_played` freezes, and the server loops on
 `nextChunk: Waiting for queue to drain` until LMS itself becomes unresponsive.
 Squeezelite logs nothing — the failure is only visible from server-side timing.
 
-### How it's fixed (three layers, loudest-wins)
+### How it's fixed (layered, loudest-wins)
 
 1. **Output stall watchdog (priority fix, portable).** The PortAudio callback
    refreshes `output.updated` on every invocation. The slimproto control loop (which
@@ -70,19 +91,50 @@ Squeezelite logs nothing — the failure is only visible from server-side timing
    rebind, debounced and gated to active playback to avoid churn on unrelated device
    changes.
 
-All three converge on the **existing** `output.pa_reopen` → `_pa_open()` path, which
+Layers 1–3 converge on the **existing** `output.pa_reopen` → `_pa_open()` path, which
 runs on the slimproto control thread under the output lock. The native hooks (which
 run on other threads) only *flag* a reopen and `wake_controller()`; they never call
 into PortAudio directly.
 
-### New CLI flag
+When reopening **isn't** enough, two escalations keep a wedged client from imposing on
+the server (the original failure made LMS spin on `Waiting for queue to drain`):
+
+4. **Exit for a supervised restart (device present but wedged).** If the device still
+   opens (`error_opening` clear) but repeated reopens don't restore sample flow — e.g.
+   PortAudio is holding a device object CoreAudio rebuilt on wake; only a fresh
+   `Pa_Initialize()` clears it — then after `<restart>` consecutive failed reopens the
+   process `exit()`s with code `OUTPUT_WATCHDOG_EXIT_CODE` (69). Exiting closes the
+   SlimProto socket (so the server immediately sees the player drop and stops looping)
+   and lets the supervisor (launchd) hand us a clean process. The consecutive-reopen
+   counting is episode-aware and unit-tested (`output_watchdog_note_reopen` /
+   `output_watchdog_should_restart`).
+
+5. **Report "stopped" to the server (device absent).** If the device can't be opened
+   at all for `OUTPUT_WATCHDOG_DEVGONE_MS` (10 s) while we should be playing — DAC
+   unplugged/removed, where a restart would only *flap* — we transition the output to
+   `OUTPUT_STOPPED` and send `STMu`, so LMS stops feeding/waiting, then let the
+   existing monitor thread keep probing for the device's return. `error_opening` is the
+   present-vs-absent signal that routes between #4 (present → restart) and #5
+   (absent → report stopped), so the two never fight.
+
+### CLI flag
 
 ```
--k <timeout>   Output stall watchdog: reopen the output device if no samples are
-               written for <timeout> seconds. Default 5, 0 disables. (PortAudio builds)
+-k <timeout>[:<restart>]   Output stall watchdog (PortAudio builds).
+    <timeout>  reopen the output device if no samples are written for this many
+               seconds. Default 5; 0 disables the watchdog entirely.
+    <restart>  after this many consecutive failed reopens, exit (code 69) for a
+               supervised restart. Default 3; 0 disables self-restart (reopen only).
 ```
 
-All existing flags and their behavior are unchanged.
+Examples: `-k 5:3` (default), `-k 10` (10 s, default restart), `-k 5:0` (reopen
+forever, never self-restart), `-k 0` (watchdog off). All existing flags are unchanged.
+
+See `examples/squeezelite.plist` for a launchd LaunchAgent that supervises the process
+(`KeepAlive`/`SuccessfulExit=false` restarts on the watchdog's non-zero exit but not on
+a clean stop; `ThrottleInterval` prevents a tight loop; `ProcessType=Interactive` keeps
+App Nap from throttling audio). It must be a LaunchAgent, not a LaunchDaemon, so it runs
+in the GUI session where CoreAudio and the IOKit/CoreAudio notifications are available.
 
 ### Log lines (grep these to correlate with server-side stalls)
 
@@ -94,22 +146,26 @@ macOS wake detected (has powered on) - reopening output device
 CoreAudio device list changed - rebinding output device '<dev>'
 output watchdog: no device writes for <N> ms (state <S>) - forcing output device reopen
 manual output recovery trigger received (SIGUSR1) - forcing output device reopen
+output recovery exhausted - exiting for supervised restart (exit 69)
+output device unavailable for <N> ms - reporting stopped to server
 ```
 
 Setup confirmations (`registered for macOS sleep/wake notifications`, `output
-watchdog enabled, timeout <N> ms`, etc.) are INFO — enable with `-d output=info`.
+watchdog enabled, timeout <N> ms, restart after <R> failed reopens`, etc.) are
+INFO — enable with `-d output=info`.
 
 ### Files
 
 | File | Role |
 | --- | --- |
-| `output_watchdog.c` | Portable watchdog timer + decision logic + SIGUSR1 trigger flag. No platform/audio deps. |
+| `output_watchdog.c` | Portable watchdog timer + stall decision + episode-aware reopen counter + restart decision + SIGUSR1 trigger flag. No platform/audio deps. |
 | `output_mac.c` | macOS-only (`#if OSX`): IOKit power notifications + CoreAudio device-list listener. |
-| `test_watchdog.c` | Standalone unit test for the watchdog decision + trigger flag. |
-| `output_pa.c` | Resets `output.updated` on successful (re)open; starts/stops the macOS hooks. |
-| `slimproto.c` | Control-loop wiring: consumes the manual trigger, runs the watchdog, reopens. |
-| `main.c` | `-k` flag parsing, `output_watchdog_init`, `SIGUSR1` handler. |
-| `squeezelite.h` | Declarations + `OUTPUT_WATCHDOG_DEFAULT_MS`. |
+| `test_watchdog.c` | Standalone unit test for the stall decision, reopen counter, restart decision, and trigger flag. |
+| `output_pa.c` | Resets `output.updated` on successful (re)open; starts/stops the macOS hooks; `output_pa_active()` guard. |
+| `slimproto.c` | Control-loop wiring: manual trigger, watchdog reopen, #4 exit-for-restart, #5 report-stopped. |
+| `main.c` | `-k <timeout>[:<restart>]` parsing, `output_watchdog_init`, `SIGUSR1` handler. |
+| `squeezelite.h` | Declarations + `OUTPUT_WATCHDOG_*` defaults / exit code. |
+| `examples/squeezelite.plist` | Sample launchd LaunchAgent that supervises and restarts the process. |
 
 ### Why it won't false-trigger
 
@@ -121,6 +177,14 @@ handled by the existing monitor thread); the output is `OUTPUT_OFF`/`OUTPUT_STOP
 backwards. In normal playback the callback fires every few ms, so a 5 s threshold has
 a wide margin. After any reopen, `output.updated` is reset, giving a fresh grace
 window.
+
+The **self-restart** (#4) is just as conservative: the reopen counter only advances on
+genuine repeat stalls within one episode (a gap longer than two timeout windows, or the
+clock going backwards, starts a fresh episode), and it resets the moment the device
+goes absent (handing off to #5) or recovers. With defaults that's ~3 failed reopens
+over ~15 s before exiting — and `ThrottleInterval` in the plist bounds restarts to one
+per 10 s even in the worst case. **Report-stopped** (#5) only fires after a sustained
+10 s outage while actively playing, and once per outage.
 
 ## Testing
 

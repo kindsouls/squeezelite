@@ -42,16 +42,30 @@ static log_level loglevel;
 // recovery threshold in milliseconds; 0 disables the watchdog
 static u32_t watchdog_timeout_ms = 0;
 
+// consecutive failed reopens within one stall episode before we give up on
+// in-process recovery and ask to be restarted; 0 disables that escalation
+static unsigned watchdog_restart_after = 0;
+
+// escalation state: how many reopens we've forced in the current episode, and
+// when the last one happened (to tell a fresh episode from a continuing one)
+static unsigned consecutive_reopens = 0;
+static u32_t    last_reopen_ms = 0;
+
 // set asynchronously from a signal handler (SIGUSR1) to force a recovery for
 // testing; sig_atomic_t so it is safe to touch from the handler
 static volatile sig_atomic_t manual_trigger = 0;
 
-void output_watchdog_init(log_level level, u32_t timeout_ms) {
+void output_watchdog_init(log_level level, u32_t timeout_ms, unsigned restart_after) {
 	loglevel = level;
 	watchdog_timeout_ms = timeout_ms;
+	watchdog_restart_after = restart_after;
 
 	if (timeout_ms) {
-		LOG_INFO("output watchdog enabled, timeout %u ms", timeout_ms);
+		if (restart_after) {
+			LOG_INFO("output watchdog enabled, timeout %u ms, restart after %u failed reopens", timeout_ms, restart_after);
+		} else {
+			LOG_INFO("output watchdog enabled, timeout %u ms, self-restart disabled", timeout_ms);
+		}
 	} else {
 		LOG_INFO("output watchdog disabled");
 	}
@@ -59,6 +73,28 @@ void output_watchdog_init(log_level level, u32_t timeout_ms) {
 
 u32_t output_watchdog_timeout(void) {
 	return watchdog_timeout_ms;
+}
+
+// Record that the watchdog has just forced a reopen and return how many it has
+// forced in a row within this stall episode. A long gap since the last reopen
+// (more than two timeout windows) means the previous episode recovered, so the
+// count starts fresh. Clock going backwards is treated as a fresh episode too.
+unsigned output_watchdog_note_reopen(u32_t now_ms) {
+	if (last_reopen_ms == 0 || now_ms < last_reopen_ms ||
+		(now_ms - last_reopen_ms) > 2 * watchdog_timeout_ms) {
+		consecutive_reopens = 0;
+	}
+	last_reopen_ms = now_ms;
+	return ++consecutive_reopens;
+}
+
+bool output_watchdog_should_restart(unsigned consecutive) {
+	return watchdog_restart_after > 0 && consecutive >= watchdog_restart_after;
+}
+
+void output_watchdog_reset(void) {
+	consecutive_reopens = 0;
+	last_reopen_ms = 0;
 }
 
 // Pure decision function: returns true if a stall recovery should be triggered.

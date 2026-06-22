@@ -88,6 +88,10 @@ int autostart;
 bool sentSTMu, sentSTMo, sentSTMl;
 u32_t new_server;
 char *new_server_cap;
+#if PORTAUDIO
+static u32_t output_error_since = 0;  // when the output device first became un-openable (0 = openable)
+static bool  output_reported_gone = false; // have we already told the server playback stopped for this outage
+#endif
 #define PLAYER_NAME_LEN 64
 char player_name[PLAYER_NAME_LEN + 1] = "";
 const char *name_file = NULL;
@@ -629,6 +633,9 @@ static void slimproto_run() {
 			bool _sendSTMn = false;
 			bool _stream_disconnect = false;
 			bool _start_output = false;
+#if PORTAUDIO
+			bool _restart_recovery = false;
+#endif
 			decode_state _decode_state;
 			disconnect_code disconnect_code;
 			static char header[MAX_HEADER];
@@ -708,6 +715,8 @@ static void slimproto_run() {
 			// only a real PortAudio device can be reopened (stdout output leaves
 			// PortAudio uninitialised), so gate the whole recovery path on it
 			if (output_pa_active()) {
+				bool _watchdog_stall = false;
+
 				// manual recovery trigger (SIGUSR1) - exercise the reopen path on demand
 				if (output_watchdog_triggered()) {
 					LOG_WARN("manual output recovery trigger received (SIGUSR1) - forcing output device reopen");
@@ -719,6 +728,7 @@ static void slimproto_run() {
 				// Force a clean reopen rather than writing into a dead stream forever.
 				if (output_watchdog_stalled(output.state, output.error_opening, output.pa_reopen,
 											output.updated, now, output_watchdog_timeout())) {
+					_watchdog_stall = true;
 					LOG_WARN("output watchdog: no device writes for %u ms (state %d) - forcing output device reopen",
 							 now - output.updated, output.state);
 					output.pa_reopen = true;
@@ -726,6 +736,39 @@ static void slimproto_run() {
 				if (output.pa_reopen) {
 					_pa_open();
 					output.pa_reopen = false;
+				}
+
+				// Escalation #1: the device still opens (error_opening clear) but reopening
+				// it repeatedly hasn't restored sample flow - in-process recovery is wedged
+				// (e.g. PortAudio holding a device object CoreAudio rebuilt on wake; only a
+				// fresh Pa_Initialize fixes it). After enough failed reopens, bail out so the
+				// supervisor restarts a clean process; exiting also closes the SlimProto
+				// socket, so the server stops waiting on us.
+				if (_watchdog_stall && !output.error_opening) {
+					if (output_watchdog_should_restart(output_watchdog_note_reopen(now))) {
+						_restart_recovery = true;
+					}
+				}
+
+				// Escalation #2: the device cannot be opened at all for a sustained period
+				// (unplugged / removed) while we should be playing - a restart would only
+				// flap, so instead tell the server we've stopped (it stops looping on
+				// "Waiting for queue to drain") and let the monitor thread keep probing for
+				// the device to return.
+				if (output.error_opening && output.state != OUTPUT_OFF && output.state != OUTPUT_STOPPED) {
+					if (output_error_since == 0) output_error_since = now;
+					if (!output_reported_gone && now > output_error_since &&
+						now - output_error_since > OUTPUT_WATCHDOG_DEVGONE_MS) {
+						LOG_WARN("output device unavailable for %u ms - reporting stopped to server", now - output_error_since);
+						output.state = OUTPUT_STOPPED;
+						output.stop_time = now;
+						_sendSTMu = true;
+						output_reported_gone = true;
+						output_watchdog_reset();
+					}
+				} else if (!output.error_opening) {
+					output_error_since = 0;
+					output_reported_gone = false;
 				}
 			}
 #endif
@@ -782,6 +825,15 @@ static void slimproto_run() {
 			if (_sendMETA) sendMETA(header, header_len);
 #if IR
 			if (_sendIR)   sendIR(ir_code, ir_ts);
+#endif
+#if PORTAUDIO
+			// done outside the locks and after any final status went out: exiting
+			// here closes the server connection cleanly and lets the supervisor
+			// (e.g. launchd) hand us a fresh process with a clean audio stack.
+			if (_restart_recovery) {
+				LOG_WARN("output recovery exhausted - exiting for supervised restart (exit %d)", OUTPUT_WATCHDOG_EXIT_CODE);
+				exit(OUTPUT_WATCHDOG_EXIT_CODE);
+			}
 #endif
 		}
 	}
