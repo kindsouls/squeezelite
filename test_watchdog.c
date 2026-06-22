@@ -42,9 +42,9 @@ int main(void) {
 	const u32_t T = 5000; // 5 second threshold
 
 	// init / accessor
-	output_watchdog_init(lINFO, T);
+	output_watchdog_init(lINFO, T, 3);
 	CHECK(output_watchdog_timeout() == T);
-	output_watchdog_init(lINFO, 0);
+	output_watchdog_init(lINFO, 0, 3);
 	CHECK(output_watchdog_timeout() == 0);
 
 	// disabled (timeout 0): never fires, even when clearly stalled
@@ -92,6 +92,28 @@ int main(void) {
 	output_watchdog_trigger();
 	CHECK( output_watchdog_triggered());
 	CHECK(!output_watchdog_triggered());
+
+	// escalation: consecutive in-episode reopens + restart decision
+	output_watchdog_init(lINFO, T, 3);           // timeout 5s, restart after 3 reopens
+	output_watchdog_reset();
+	CHECK(output_watchdog_note_reopen(10000) == 1);
+	CHECK(!output_watchdog_should_restart(1));
+	CHECK(output_watchdog_note_reopen(15000) == 2);   // gap == timeout: same episode
+	CHECK(!output_watchdog_should_restart(2));
+	CHECK(output_watchdog_note_reopen(20000) == 3);   // threshold reached
+	CHECK( output_watchdog_should_restart(3));
+	CHECK( output_watchdog_should_restart(4));
+	// a gap longer than two timeout windows is a fresh episode -> count restarts
+	CHECK(output_watchdog_note_reopen(40000) == 1);
+	// clock going backwards is treated as a fresh episode too
+	CHECK(output_watchdog_note_reopen(100) == 1);
+	// explicit reset clears the running count
+	output_watchdog_note_reopen(50000);
+	output_watchdog_reset();
+	CHECK(output_watchdog_note_reopen(60000) == 1);
+	// self-restart disabled (restart_after = 0) never escalates
+	output_watchdog_init(lINFO, T, 0);
+	CHECK(!output_watchdog_should_restart(99));
 
 	if (failures) {
 		printf("watchdog tests: %d FAILED\n", failures);
