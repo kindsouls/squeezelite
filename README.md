@@ -1,11 +1,3 @@
-Squeezelite v2.0.x, Copyright 2012-2015 Adrian Smith, 2015-2026 Ralph Irving.<br>
-<br>
-See the squeezelite manpage for usage details.<br>
-https://ralph-irving.github.io/squeezelite.html<br>
-<br>
-
----
-
 ## This fork — macOS sleep/wake & stream-stall hardening
 
 A fork of [ralph-irving/squeezelite](https://github.com/ralph-irving/squeezelite)
